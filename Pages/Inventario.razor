@@ -1,0 +1,209 @@
+@page "/inventario"
+@inject HttpClient http
+
+<h3>Inventario</h3>
+
+@if (!PagedItems.Any())
+{
+    <p>No hay items en el inventario.</p>
+}
+else
+{
+    <ul>
+        @foreach (var item in PagedItems)
+        {
+            <div style="margin-bottom: 8px;">
+                <b>@item.Nom</b> - @item.Quantitat - @item.TipusQuantitat - @item.Preu €
+                <button @onclick="() => EliminarItem(item.Id)">Eliminar</button>
+                <button @onclick="() => ToggleComprado(item)">
+                    @(item.Comprat ? "Cancelar compra" : "Marcar como comprado")
+                </button>
+                @if (pendingDeletion.ContainsKey(item.Id))
+                {
+                    <span style="color:red;">(Se eliminará en @Math.Ceiling((pendingDeletion[item.Id] - DateTime.Now).TotalSeconds) seg.)</span>
+                }
+            </div>
+        }
+    </ul>
+}
+
+<hr />
+
+<div class="pagination">
+    <button @onclick="PreviousPage" disabled="@(currentPage == 1)">Anterior</button>
+
+    @for (int i = 1; i <= TotalPages; i++)
+    {
+        <button @onclick="() => GoToPage(i)" class="@(i == currentPage ? "active" : "")">@i</button>
+    }
+
+    <button @onclick="NextPage" disabled="@(currentPage == TotalPages)">Siguiente</button>
+</div>
+
+<h4>Agregar nuevo ítem</h4>
+
+<div class="form-group">
+    <label>Nom:</label>
+    <input class="form-control" @bind="nuevoItem.Nom" />
+</div>
+
+<div class="form-group">
+    <label>Quantitat:</label>
+    <input type="number" class="form-control" @bind="nuevoItem.Quantitat" />
+</div>
+
+<div class="mb-3">
+    <label for="tipoCantidad" class="form-label">Tipus de quantitat</label>
+    <select id="tipoCantidad" class="form-select" @bind="nuevoItem.TipusQuantitat">
+        <option value="">-- Selecciona --</option>
+        <option value="Unitats">Unitats</option>
+        <option value="Grams">Grams</option>
+        <option value="Litres">Litres</option>
+        <option value="Kilos">Kilos</option>
+    </select>
+</div>
+
+<div class="form-group">
+    <label>Preu:</label>
+    <input type="number" step="0.01" class="form-control" @bind="nuevoItem.Preu" />
+</div>
+
+<button class="btn btn-primary mt-2" @onclick="AgregarItem">Agregar</button>
+
+@code {
+    private List<Item> allItems = new();
+    private int currentPage = 1;
+    private int pageSize = 20;
+
+    private Item nuevoItem = new();
+    private Dictionary<int, DateTime> pendingDeletion = new();
+
+    private IEnumerable<Item> PagedItems => allItems
+        .Skip((currentPage - 1) * pageSize)
+        .Take(pageSize);
+
+    private int TotalPages => (int)Math.Ceiling((double)allItems.Count / pageSize);
+
+    private async Task CargarItems()
+    {
+        try
+        {
+            allItems = await http.GetFromJsonAsync<List<Item>>("http://192.168.1.231:5001/api/items") ?? new List<Item>();
+            if (allItems.Any())
+                currentPage = 1;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error al cargar ítems: {ex.Message}");
+        }
+    }
+
+    private async Task AgregarItem()
+    {
+        try
+        {
+            var response = await http.PostAsJsonAsync("http://192.168.1.231:5001/api/items", nuevoItem);
+            if (response.IsSuccessStatusCode)
+            {
+                nuevoItem = new Item();
+                await CargarItems();
+            }
+            else
+            {
+                Console.WriteLine("Error al agregar el ítem");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Excepción al agregar ítem: " + ex.Message);
+        }
+    }
+
+    private async Task EliminarItem(int id)
+    {
+        var response = await http.DeleteAsync($"http://192.168.1.231:5001/api/items/{id}");
+        if (response.IsSuccessStatusCode)
+        {
+            await CargarItems();
+        }
+        else
+        {
+            var error = await response.Content.ReadAsStringAsync();
+            Console.WriteLine($"Error al eliminar el ítem: {error}");
+        }
+    }
+
+    private async Task ToggleComprado(Item item)
+    {
+        // Cambia el estado
+        item.Comprat = !item.Comprat;
+
+        // Guarda en BD
+        var response = await http.PutAsJsonAsync($"http://192.168.1.231:5001/api/items/{item.Id}", item);
+
+        if (response.IsSuccessStatusCode)
+        {
+            if (item.Comprat)
+            {
+                // Programar borrado en 5 minutos
+                pendingDeletion[item.Id] = DateTime.Now.AddSeconds(10);
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(10));
+                    if (pendingDeletion.ContainsKey(item.Id))
+                    {
+                        await EliminarItem(item.Id);
+                        pendingDeletion.Remove(item.Id);
+                        await InvokeAsync(StateHasChanged);
+                    }
+                });
+            }
+            else
+            {
+                // Cancelar borrado
+                if (pendingDeletion.ContainsKey(item.Id))
+                {
+                    pendingDeletion.Remove(item.Id);
+                }
+            }
+
+            await InvokeAsync(StateHasChanged);
+        }
+        else
+        {
+            var error = await response.Content.ReadAsStringAsync();
+            Console.WriteLine($"Error al actualizar el estado del ítem: {error}");
+        }
+    }
+
+    private void NextPage()
+    {
+        if (currentPage < TotalPages) currentPage++;
+    }
+
+    private void PreviousPage()
+    {
+        if (currentPage > 1) currentPage--;
+    }
+
+    private void GoToPage(int page)
+    {
+        if (page >= 1 && page <= TotalPages)
+            currentPage = page;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await CargarItems();
+    }
+
+    public class Item
+    {
+        public int Id { get; set; }
+        public string Nom { get; set; } = string.Empty;
+        public float Quantitat { get; set; }
+        public string TipusQuantitat { get; set; } = string.Empty;
+        public float Preu { get; set; }
+        public bool Comprat { get; set; }
+    }
+}
